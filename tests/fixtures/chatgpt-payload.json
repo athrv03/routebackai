@@ -1,0 +1,10 @@
+{
+  "action": "next",
+  "messages": [
+    {
+      "author": { "role": "user" },
+      "content": { "content_type": "text", "parts": ["Why is the sky blue?"] }
+    }
+  ],
+  "conversation_id": "fixture-only"
+}

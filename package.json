@@ -1,0 +1,46 @@
+{
+  "name": "routebackai",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "build:demo": "tsc --noEmit && vite build --mode demo",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "npm run build && npm run build:demo && playwright test",
+    "check": "npm run typecheck && npm test && npm run build",
+    "build:private": "tsc --noEmit && vite build --mode private"
+  },
+  "dependencies": {
+    "firebase": "13.4.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.2.1",
+    "@playwright/test": "^1.56.1",
+    "@tailwindcss/vite": "^4.1.0",
+    "@types/chrome": "^0.1.24",
+    "@types/node": "^22.19.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.1.0",
+    "esbuild": "^0.28.2",
+    "tailwindcss": "^4.1.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.2.2",
+    "vitest": "^4.1.12"
+  },
+  "overrides": {
+    "@grpc/grpc-js": "^1.14.3",
+    "tinypool": "^2.1.2"
+  },
+  "engines": {
+    "node": ">=24.12.0"
+  }
+}

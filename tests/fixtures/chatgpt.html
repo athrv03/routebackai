@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Controlled ChatGPT fixture</title>
+  </head>
+  <body>
+    <div data-message-author-role="user">
+      What is light?<button>Copy</button><span hidden>secret hidden text</span>
+    </div>
+    <div data-message-author-role="assistant">
+      Light is electromagnetic radiation.
+    </div>
+    <form>
+      <textarea id="prompt-textarea" aria-label="ChatGPT query"></textarea
+      ><button type="submit" data-testid="send-button">Send</button>
+    </form>
+    <p id="status"></p>
+    <script>
+      document
+        .querySelector("form")
+        .addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const query = document.querySelector("textarea").value;
+          const payload = {
+            action: "next",
+            messages: [
+              {
+                author: { role: "user" },
+                content: { content_type: "text", parts: [query] },
+              },
+            ],
+            conversation_id: "fixture-only",
+          };
+          try {
+            const response = await fetch("/backend-api/conversation", {
+              method: "POST",
+              body: JSON.stringify(payload),
+              headers: { "Content-Type": "application/json" },
+            });
+            document.querySelector("#status").textContent = String(
+              response.status,
+            );
+          } catch {
+            document.querySelector("#status").textContent = "network error";
+          }
+        });
+    </script>
+  </body>
+</html>
