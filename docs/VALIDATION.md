@@ -15,10 +15,10 @@
 5. Switch to Local only; confirm coding and long queries are blocked. Disconnect from the network and verify a short eligible query still works after model setup. Inspect network activity to confirm no Firebase inference request.
 6. Test cloud unavailability or an invalid App Check token. Confirm a retryable error, no substitution to local for cloud-required queries, and no loss of saved user messages.
 7. Enable recovery and reload a user-controlled signed-in ChatGPT tab. Verify composer selectors, payload extraction and endpoint matching using DevTools; never record authorization headers or real private prompts in fixtures.
-8. Keep the adapter unchecked until that verification succeeds. Confirm an observed generation failure is manually reviewable in this mode. Once verified, enable its validation checkbox.
+8. Until that verification succeeds, consider turning on Settings → *Confirm each captured ChatGPT prompt* so every recovery is reviewed first.
 9. Use DevTools request blocking or a controlled test proxy to fail **only** the verified generation endpoint. A blocked transport may be reported by Chrome as cancellation and correctly excluded; use the controlled 503 fixture for deterministic failure testing.
-10. Confirm query/context preview, three-second retry grace, correct tab matching and local/cloud routing. Confirm failures in other requests do not generate answers.
-11. Close the side panel, fail a generation, verify the badge, then open the panel and verify recovery. Try a second tab, permission revocation, and five-minute cache expiry.
+10. Confirm query/context preview, three-second retry grace, correct tab matching, and that recovery answers on-device first (including coding and long prompts). Fail with HTTP 429 as well as 503. Confirm failures in other requests do not generate answers.
+11. Close the side panel, fail a generation, verify the badge and the in-page **Answer with Gemini Nano** notice; click it and verify the panel opens and recovery starts. Try a second tab, permission revocation, and five-minute cache expiry.
 12. Do not claim live ChatGPT support or actual Gemini execution based solely on the deterministic demo.
 
 ## Demo script
@@ -27,7 +27,7 @@
 - Show a coding query routed to Gemini through Firebase.
 - Show a long query routed to cloud, then show Local only blocking it.
 - Show a controlled ChatGPT 503 recovering the correct stored question and visible context.
-- Show saved chat persistence and that recovery did not append to saved history.
+- Show saved chat persistence, and that a recovered answer is saved as its own "Recovered · …" conversation.
 
 ## Known boundaries
 

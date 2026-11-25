@@ -1,7 +1,7 @@
 import { RecoveryEngine } from "./engine";
 import { isGenerationURL, validateBridge } from "../shared/adapter";
 import {
-  isClassification,
+  isRecoverableStatus,
   type Attempt,
   type PanelRequest,
   type PanelResponse,
@@ -46,11 +46,36 @@ async function persist() {
   observations = observations
     .filter((o) => o.at > Date.now() - 300_000)
     .slice(-100);
+  // Failures past the retry grace get one in-page prompt on their ChatGPT tab.
+  const announce = engine.attempts.filter(
+    (a) =>
+      a.error &&
+      !a.notified &&
+      (a.state === "failed" || a.state === "confirmation"),
+  );
+  for (const a of announce) a.notified = true;
   await chrome.storage.session.set({
     [KEY]: engine.attempts,
     [OBS]: observations,
   });
   await updateBadges();
+  await Promise.all(
+    announce.map((a) =>
+      chrome.tabs
+        .sendMessage(
+          a.tabId,
+          {
+            type: "routeback-failed",
+            id: a.id,
+            error: a.error,
+            // Shown so the click is an informed confirmation of this exact prompt.
+            query: a.query.length > 140 ? a.query.slice(0, 140) + "…" : a.query,
+          },
+          { documentId: a.documentId },
+        )
+        .catch(() => undefined),
+    ),
+  );
   const due = engine.attempts
     .filter((a) => a.state === "waiting")
     .map((a) => a.dueAt!);
@@ -96,6 +121,13 @@ async function stopCapture() {
           .sendMessage(t.id!, { type: "routeback-disable" })
           .catch(() => undefined),
       ),
+  );
+}
+// Prompts are answered automatically unless the user opted into confirming each one.
+async function autoRecover() {
+  return (
+    (await chrome.storage.local.get("adapterVerified")).adapterVerified !==
+    false
   );
 }
 async function enabled() {
@@ -285,6 +317,32 @@ chrome.runtime.onMessage.addListener(
   (message: unknown, sender, sendResponse) => {
     if (!message || typeof message !== "object") return false;
     const m = message as Record<string, unknown>;
+    if (m.type === "open-panel") {
+      // Sent from the in-page recovery prompt. Open synchronously so the click's user gesture still applies.
+      if (
+        sender.tab?.windowId === undefined ||
+        !sender.url ||
+        new URL(sender.url).origin !== "https://chatgpt.com"
+      )
+        return false;
+      const opened = chrome.sidePanel.open({ windowId: sender.tab.windowId });
+      const tabId = sender.tab.id;
+      // The user saw this prompt in the notice and asked for an answer: that confirms it.
+      const confirmed = transaction(async () => {
+        const a = engine.attempts.find(
+          (a) => a.id === m.id && a.tabId === tabId,
+        );
+        if (a?.error && a.state === "confirmation") {
+          a.state = "failed";
+          await persist();
+        }
+      });
+      Promise.all([opened, confirmed]).then(
+        () => sendResponse({ ok: true }),
+        (e) => sendResponse({ ok: false, error: String(e) }),
+      );
+      return true;
+    }
     if (m.type === "bridge") {
       if (
         sender.tab?.id === undefined ||
@@ -299,9 +357,7 @@ chrome.runtime.onMessage.addListener(
         if (!(await enabled())) return;
         const event = m.event as import("../shared/types").BridgeEvent;
         if (event.kind === "capture") {
-          const verified =
-            (await chrome.storage.local.get("adapterVerified"))
-              .adapterVerified === true;
+          const verified = await autoRecover();
           engine.capture(
             event.capture,
             sender.tab!.id!,
@@ -333,7 +389,7 @@ chrome.runtime.onMessage.addListener(
               engine.remove(a.id);
             else if (
               event.error === "network" ||
-              [500, 502, 503, 504].includes(event.status || 0)
+              isRecoverableStatus(event.status)
             ) {
               a.state = "confirmation";
               engine.outcome(
@@ -388,9 +444,7 @@ chrome.runtime.onMessage.addListener(
           return {
             ok: true,
             enabled: await enabled(),
-            adapterEnabled:
-              (await chrome.storage.local.get("adapterVerified"))
-                .adapterVerified === true,
+            adapterEnabled: await autoRecover(),
           };
         case "enable":
           await register();
@@ -413,10 +467,6 @@ chrome.runtime.onMessage.addListener(
           // Read path: only write storage/badges when the sweep changed state.
           if (swept) await persist();
           return { ok: true, attempts: engine.attempts };
-        case "classified":
-          if (isClassification(req.classification))
-            engine.classify(req.id, req.classification);
-          break;
         case "claim": {
           if (!owners.has(req.owner))
             return {

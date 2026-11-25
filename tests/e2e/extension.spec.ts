@@ -121,7 +121,7 @@ test("routes coding and 26-word queries to cloud, blocks them in Local only", as
   await expect(panel.getByRole("alert")).toContainText("Switch to Auto");
   await expect(panel.locator(".message.assistant")).toHaveCount(0);
 });
-test("captures visible context and recovers matching HTTP 503 without saving a chat", async ({
+test("captures visible context, recovers matching HTTP 503 and saves it to chat history", async ({
   extension: { context, panel },
 }) => {
   await panel.evaluate(() =>
@@ -133,6 +133,10 @@ test("captures visible context and recovers matching HTTP 503 without saving a c
     .fill("Why is the sky blue?");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.locator("#status")).toHaveText("503");
+  // In-page prompt on ChatGPT offering the Nano answer.
+  await expect(
+    page.getByRole("button", { name: "Answer with Gemini Nano" }),
+  ).toBeVisible({ timeout: 15000 });
   await expect(panel.locator(".result")).toContainText("Why is the sky blue?", {
     timeout: 15000,
   });
@@ -152,12 +156,26 @@ test("captures visible context and recovers matching HTTP 503 without saving a c
       ),
     )
     .toBe(0);
+  // Saved as its own conversation; the current chat is untouched and it survives reopening.
   await panel.getByRole("button", { name: "Chat", exact: true }).click();
   await expect(panel.locator(".message")).toHaveCount(0);
+  await panel.getByRole("button", { name: "Recovery", exact: false }).click();
+  await panel
+    .getByRole("button", { name: /Saved to chat history/ })
+    .click();
+  await expect(panel.locator(".message.assistant")).toContainText(
+    "Demo response",
+  );
+  await expect(panel.locator(".message.user")).toContainText(
+    "Why is the sky blue?",
+  );
 });
-test("requires confirmation until the adapter is validated and excludes hidden text", async ({
+test("asks for confirmation when the user opts in, and excludes hidden text", async ({
   extension: { context, panel },
 }) => {
+  await panel.evaluate(() =>
+    chrome.storage.local.set({ adapterVerified: false }),
+  );
   const page = await fixture(context);
   await page
     .getByRole("textbox", { name: "ChatGPT query" })
@@ -230,18 +248,55 @@ test("production manifest bundles scripts and never ships the demo simulator", a
   expect(background).not.toContain("demo-failure");
 });
 
-test('classifies a captured coding query after the panel reopens, then recovers in cloud', async ({ extension: { context, panel, url } }) => {
-  await panel.evaluate(() => chrome.storage.local.set({ adapterVerified: true }));
+test('sends a captured coding query to cloud after the panel reopens', async ({ extension: { context, panel, url } }) => {
   await panel.close();
   const page = await fixture(context);
   await page.getByRole('textbox', { name: 'ChatGPT query' }).fill('Write a Python function to sort names.');
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.locator('#status')).toHaveText('503');
   const reopened = await context.newPage(); await reopened.goto(url);
-  await expect(reopened.locator('.result')).toContainText('Coding request');
+  await expect(reopened.locator('.result')).toContainText('Coding request · using Firebase cloud');
   await expect(reopened.locator('.result')).toContainText('Gemini · Firebase cloud');
   await page.close();
   await expect(reopened.locator('.result')).toHaveCount(0);
+});
+
+test("offline-style failure: clicking the in-page notice confirms the prompt and recovers it", async ({
+  extension: { context, panel },
+}) => {
+  await panel.close();
+  const html = await readFile(resolve("tests/fixtures/chatgpt.html"), "utf8");
+  await context.route("https://chatgpt.com/", (route) =>
+    route.fulfill({ contentType: "text/html", body: html }),
+  );
+  // Like DevTools "Offline": the page sees a transport error that Chrome's webRequest never observes.
+  await context.route("https://chatgpt.com/backend-api/conversation", (route) =>
+    route.abort("internetdisconnected"),
+  );
+  const page = await context.newPage();
+  await page.goto("https://chatgpt.com/");
+  await page.getByRole("textbox", { name: "ChatGPT query" }).fill("Why is the sky blue?");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  const notice = page.locator("#routeback-capture-notice");
+  await expect(notice).toContainText("Why is the sky blue?", { timeout: 15000 });
+  await notice.getByRole("button", { name: "Answer with Gemini Nano" }).click();
+  await expect(notice).toHaveCount(0);
+  // The side panel opened by the click (not a Playwright page in headless) answers it and clears the attempt.
+  const worker = context.serviceWorkers()[0];
+  await expect
+    .poll(
+      () =>
+        worker.evaluate(
+          async () =>
+            (
+              ((await chrome.storage.session.get("routeback.pending.v1"))[
+                "routeback.pending.v1"
+              ] as unknown[]) || []
+            ).length,
+        ),
+      { timeout: 15000 },
+    )
+    .toBe(0);
 });
 
 test.describe('optional site access', () => {

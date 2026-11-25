@@ -40,8 +40,9 @@ export interface Attempt {
   state: "pending" | "waiting" | "failed" | "claimed" | "confirmation";
   error?: string;
   dueAt?: number;
-  classification?: Classification;
   claim?: { owner: string; until: number };
+  /** Set once the ChatGPT tab has been shown the in-page recovery prompt. */
+  notified?: boolean;
   requestId?: string;
 }
 export interface Capture {
@@ -62,7 +63,6 @@ export type BridgeEvent =
     };
 export type PanelRequest =
   | { type: "attempts" }
-  | { type: "classified"; id: string; classification: Classification }
   | { type: "claim"; id: string; owner: string; confirmed?: boolean }
   | { type: "release"; id: string; owner: string }
   | { type: "complete"; id: string; owner: string }
@@ -82,5 +82,9 @@ export interface PanelResponse {
 export const TTL = 5 * 60_000;
 export const GRACE = 3_000;
 export const MAX_CAPTURE_CHARS = 180_000;
+// ChatGPT failures worth answering locally: rate limiting and server errors.
+export const RECOVERABLE_STATUS = [429, 500, 502, 503, 504];
+export const isRecoverableStatus = (status?: number) =>
+  status !== undefined && RECOVERABLE_STATUS.includes(status);
 export const isClassification = (value: unknown): value is Classification =>
   value === "coding" || value === "non_coding" || value === "uncertain";

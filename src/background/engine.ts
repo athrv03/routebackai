@@ -1,9 +1,9 @@
 import {
   GRACE,
   TTL,
+  isRecoverableStatus,
   type Attempt,
   type Capture,
-  type Classification,
 } from "../shared/types";
 export class RecoveryEngine {
   attempts: Attempt[];
@@ -74,25 +74,23 @@ export class RecoveryEngine {
     if (
       (status && status >= 200 && status < 300) ||
       error === "cancelled" ||
-      (status && ![500, 502, 503, 504].includes(status))
+      (status && !isRecoverableStatus(status))
     ) {
       this.remove(id);
       return;
     }
-    if (![500, 502, 503, 504].includes(status ?? 0) && error !== "network")
-      return;
+    if (!isRecoverableStatus(status) && error !== "network") return;
     if (a.state === "claimed" || a.error) return;
-    a.error = status
-      ? `ChatGPT returned HTTP ${status}`
-      : "ChatGPT connection failed";
+    a.error =
+      status === 429
+        ? "ChatGPT rate limit reached (HTTP 429)"
+        : status
+          ? `ChatGPT returned HTTP ${status}`
+          : "ChatGPT connection failed";
     if (a.state !== "confirmation") {
       a.state = "waiting";
       a.dueAt = this.now() + GRACE;
     }
-  }
-  classify(id: string, classification: Classification) {
-    const a = this.attempts.find((a) => a.id === id);
-    if (a) a.classification = classification;
   }
   claim(id: string, owner: string, confirmed = false): Attempt | undefined {
     this.sweep();

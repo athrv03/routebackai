@@ -10,7 +10,7 @@ Only optional access to chatgpt.com enables capture. Each cache entry contains t
 
 The snapshot contains only rendered message text; unloaded history and attachments are not captured. DOM selectors may change. Prompts/context over capture limits are not truncated. In-page submission snapshots are discarded after 15 seconds. The extension does not read cookies, authorization headers, all network bodies or unrelated pages. It never logs prompts.
 
-Recovery output and its displayed prompt are held in panel memory, not saved chat history. Dismissal, source-tab closure or panel closure removes these results. Closing the panel cancels consumption and aborts requests where supported; a cloud request already dispatched can still complete and consume provider quota. Chromium/Firebase control native model session cleanup when the panel is unloaded. The Firebase SDK does not expose a public model-session destroy method; measurement sessions created directly through Chrome are explicitly destroyed.
+A completed recovery is saved to chat history as its own conversation ("Recovered · …") containing the recovered prompt and answer, stored like any other saved chat until deleted. The captured ChatGPT context is not saved. Unfinished or failed recoveries are shown only in panel memory; dismissal, source-tab closure or panel closure removes them. Closing the panel cancels consumption and aborts requests where supported; a cloud request already dispatched can still complete and consume provider quota. Chromium/Firebase control native model session cleanup when the panel is unloaded. The Firebase SDK does not expose a public model-session destroy method; measurement sessions created directly through Chrome are explicitly destroyed.
 
 ## Inference
 

@@ -47,6 +47,7 @@ import type {
   Turn,
 } from "../shared/types";
 import { loadChats, newChat, saveChats } from "../storage/chats";
+import { recoverNanoFirst } from "../ai/recovery";
 import { request } from "./api";
 const demo = import.meta.env.MODE === "demo";
 const createProvider = async (): Promise<Provider> =>
@@ -121,6 +122,8 @@ interface RecoveryResult {
   reason: string;
   error: string;
   interrupted?: boolean;
+  /** Saved conversation holding this recovered answer. */
+  chatId?: string;
 }
 export function App() {
   const [provider, setProvider] = useState<Provider>();
@@ -147,7 +150,8 @@ export function App() {
   const [history, setHistory] = useState(false);
   const [onboarded, setOnboarded] = useState(false);
   const [enabled, setEnabled] = useState(false);
-  const [adapterEnabled, setAdapterEnabled] = useState(false);
+  // True = answer failed ChatGPT prompts automatically (default); false = confirm each one.
+  const [adapterEnabled, setAdapterEnabled] = useState(true);
   const [attempts, setAttempts] = useState<Attempt[]>([]);
   const [results, setResults] = useState<RecoveryResult[]>([]);
   const resultsRef = useRef<RecoveryResult[]>([]);
@@ -158,6 +162,14 @@ export function App() {
   const [, setTick] = useState(0);
   const end = useRef<HTMLDivElement>(null);
   const current = chats.find((c) => c.id === currentId);
+  // Jump to the Recovery tab whenever a failure appears that this panel hasn't shown yet.
+  const announced = useRef(new Set<string>());
+  const showAttempts = (next: Attempt[]) => {
+    setAttempts(next);
+    const fresh = next.filter((a) => a.error && !announced.current.has(a.id));
+    fresh.forEach((a) => announced.current.add(a.id));
+    if (fresh.length) setView("recovery");
+  };
   const draft = drafts[currentId] || "";
 
   useEffect(() => {
@@ -198,7 +210,7 @@ export function App() {
     const poll = () => {
       void request({ type: "attempts" }).then(
         (res) => {
-          if (mounted.current) setAttempts(res.attempts || []);
+          if (mounted.current) showAttempts(res.attempts || []);
         },
         (e) => {
           if (mounted.current) setError(errorText(e));
@@ -214,7 +226,7 @@ export function App() {
       if (area === "session" && changes["routeback.pending.v1"]) {
         const next = (changes["routeback.pending.v1"].newValue ||
           []) as Attempt[];
-        setAttempts(next);
+        showAttempts(next);
         if (
           activeRecovery.current &&
           !next.some((a) => a.id === activeRecovery.current!.id)
@@ -322,15 +334,14 @@ export function App() {
     query: string,
     turns: Turn[],
     controller: AbortController,
-    cached?: Classification,
   ) => {
     if (!provider) throw new Error("Model provider is loading.");
     const text = serialize(turns, query);
     // route() checks length, then coding, then fit: skip local model calls whose result cannot change the route.
     const long = exceedsLocalWords(query);
     const classification: Classification = long
-      ? (cached ?? "uncertain")
-      : (cached ?? (await provider.classify(query, controller.signal)));
+      ? "uncertain"
+      : await provider.classify(query, controller.signal);
     const fits =
       long || classification === "coding"
         ? true
@@ -451,6 +462,44 @@ export function App() {
       finish();
     }
   }
+  async function saveRecovered(
+    query: string,
+    answer: string,
+    source: Source | undefined,
+    reason: string,
+  ): Promise<string | undefined> {
+    if (storageFailed) return;
+    const now = Date.now();
+    const chat: Chat = {
+      id: crypto.randomUUID(),
+      title: `Recovered · ${query.slice(0, 40)}`,
+      createdAt: now,
+      updatedAt: now,
+      messages: [
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          content: query,
+          createdAt: now,
+          status: "complete",
+        },
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: answer,
+          createdAt: now,
+          status: "complete",
+          source,
+          reason,
+        },
+      ],
+    };
+    // Recovery's answer is shown either way; a failed save is surfaced by store().
+    return store([chat, ...chatsRef.current]).then(
+      () => chat.id,
+      () => undefined,
+    );
+  }
   async function recover(attempt: Attempt, confirmed = false) {
     if (!provider || !onboarded) return;
     const controller = acquire();
@@ -500,31 +549,35 @@ export function App() {
         );
         if (mounted.current) setResults(resultsRef.current);
       }, active.expiresAt - Date.now());
-      const chosen = await decide(
+      source = await recoverNanoFirst(
+        provider,
         active.query,
         active.snapshot.turns,
-        controller,
-        active.classification,
-      );
-      reason = chosen.next.reason;
-      update();
-      source = await provider.stream(
-        chosen.text,
-        chosen.next,
-        controller.signal,
-        (delta, actual) => {
-          if (!mounted.current || controller.signal.aborted) return;
-          text += delta;
-          source = actual || source;
-          update();
+        {
+          mode,
+          online: navigator.onLine,
+          signal: controller.signal,
+          onPlan: (next) => {
+            reason = next.reason;
+            if (mounted.current) setDecision(next);
+            update();
+          },
+          onText: (delta, actual) => {
+            if (!mounted.current || controller.signal.aborted) return;
+            text += delta;
+            source = actual || source;
+            update();
+          },
         },
       );
       if (Date.now() >= active.expiresAt)
         throw new Error("Recovery prompt expired during generation.");
       activeRecovery.current = undefined;
       await request({ type: "complete", id: active.id, owner });
+      // Keep the recovered exchange in chat history so it survives closing the panel.
+      const chatId = await saveRecovered(active.query, text, source, reason);
       resultsRef.current = resultsRef.current.map((r) =>
-        r.id === active.id ? { ...r, source, interrupted: false } : r,
+        r.id === active.id ? { ...r, source, interrupted: false, chatId } : r,
       );
       if (mounted.current) setResults(resultsRef.current);
     } catch (e) {
@@ -545,7 +598,7 @@ export function App() {
       finish();
     }
   }
-  // Classify captured prompts even before failure, but never generate a recovery answer before failure.
+  // Start a recovery as soon as a failure is ready; never generate before ChatGPT has failed.
   useEffect(() => {
     if (!provider || busy || busyRef.current || !onboarded) return;
     const ready = attempts.find(
@@ -555,29 +608,7 @@ export function App() {
         !held.has(a.id) &&
         a.expiresAt > Date.now(),
     );
-    if (ready) {
-      void recover(ready);
-      return;
-    }
-    const unclassified = attempts.find(
-      (a) =>
-        !a.classification &&
-        !exceedsLocalWords(a.query) &&
-        a.state !== "claimed" &&
-        a.expiresAt > Date.now(),
-    );
-    if (!unclassified) return;
-    const controller = acquire();
-    if (!controller) return;
-    void provider
-      .classify(unclassified.query, controller.signal)
-      .then((classification) =>
-        request({ type: "classified", id: unclassified.id, classification }),
-      )
-      .catch((e) => {
-        if (!controller.signal.aborted) setError(errorText(e));
-      })
-      .finally(finish);
+    if (ready) void recover(ready);
   }, [attempts, busy, provider, onboarded, held, mode]);
   // Wake once at the next deadline (retry grace, claim lease, expiry) instead of polling every second.
   // The attempts request runs the background sweep; chrome.alarms may be clamped to 30s in packed builds.
@@ -717,7 +748,8 @@ export function App() {
           </p>
           <p>
             Chat history is saved in this browser profile until deleted.
-            Recovery captures visible ChatGPT text for up to five minutes.
+            Recovery captures visible ChatGPT text for up to five minutes and
+            answers failed prompts with Gemini Nano on your device first.
             Missing history and attachments are not included.
           </p>
           <button
@@ -787,20 +819,20 @@ export function App() {
           <label className="checkbox">
             <input
               type="checkbox"
-              checked={adapterEnabled}
+              checked={!adapterEnabled}
               onChange={(e) => {
-                const value = e.target.checked;
+                const value = !e.target.checked;
                 void request({ type: "adapter", enabled: value }).then(
                   () => setAdapterEnabled(value),
                   (e) => setError(errorText(e)),
                 );
               }}
             />
-            Live adapter validated in a signed-in ChatGPT session
+            Confirm each captured ChatGPT prompt before answering it
           </label>
           <p className="fineprint">
-            Until validated, failures require confirmation. Reload ChatGPT after
-            enabling site access.
+            Off by default: failed prompts are answered with Gemini Nano as soon
+            as you open the panel. Reload ChatGPT after enabling site access.
           </p>
           <div className="setting-row">
             <div>
@@ -1276,6 +1308,18 @@ export function App() {
                 <CopyButton text={r.text} />
               </div>
               <p className="route-detail">{r.reason}</p>
+              {r.chatId && (
+                <button
+                  className="text-button"
+                  onClick={() => {
+                    setCurrentId(r.chatId!);
+                    setView("chat");
+                  }}
+                >
+                  <MessageSquare size={14} />
+                  Saved to chat history · continue in Chat
+                </button>
+              )}
             </section>
           ))}
           {busy && (

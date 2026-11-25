@@ -15,7 +15,7 @@ beforeEach(() => {
   engine = new RecoveryEngine([], () => now);
 });
 describe("recovery lifecycle", () => {
-  it.each([500, 502, 503, 504])("recovers %i after retry grace", (status) => {
+  it.each([429, 500, 502, 503, 504])("recovers %i after retry grace", (status) => {
     engine.capture(capture(), 1, "doc", true);
     engine.outcome("attempt", 1, "doc", status);
     expect(engine.claim("attempt", "panel")).toBeUndefined();
@@ -28,7 +28,7 @@ describe("recovery lifecycle", () => {
     engine.complete("attempt", "panel");
     expect(engine.attempts).toHaveLength(0);
   });
-  it.each([200, 201, 204, 304, 401, 403, 429])(
+  it.each([200, 201, 204, 304, 401, 403])(
     "does not recover HTTP %i",
     (status) => {
       engine.capture(capture(), 1, "doc", true);
