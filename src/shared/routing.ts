@@ -7,6 +7,10 @@ import type {
 } from "./types";
 export const wordCount = (text: string) =>
   text.trim() ? text.trim().split(/\s+/u).length : 0;
+export const MAX_LOCAL_WORDS = 25;
+// Length alone decides the route, so local classification/measurement would be wasted work.
+export const exceedsLocalWords = (query: string) =>
+  wordCount(query) > MAX_LOCAL_WORDS;
 export function route(
   query: string,
   classification: Classification,
@@ -14,8 +18,8 @@ export function route(
   mode: Mode,
 ): Decision {
   const reason =
-    wordCount(query) > 25
-      ? "Query exceeds 25 words"
+    exceedsLocalWords(query)
+      ? `Query exceeds ${MAX_LOCAL_WORDS} words`
       : classification === "coding"
         ? "Coding request"
         : !fits

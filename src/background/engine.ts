@@ -14,16 +14,24 @@ export class RecoveryEngine {
     this.attempts = attempts;
     this.sweep();
   }
-  sweep() {
+  /** Expires attempts and advances timed states. Returns whether anything changed. */
+  sweep(): boolean {
     const now = this.now();
+    const before = this.attempts.length;
     this.attempts = this.attempts.filter((a) => a.expiresAt > now);
+    let changed = this.attempts.length !== before;
     for (const a of this.attempts) {
       if (a.state === "claimed" && a.claim && a.claim.until <= now) {
         a.state = "failed";
         delete a.claim;
+        changed = true;
       }
-      if (a.state === "waiting" && a.dueAt! <= now) a.state = "failed";
+      if (a.state === "waiting" && a.dueAt! <= now) {
+        a.state = "failed";
+        changed = true;
+      }
     }
+    return changed;
   }
   capture(c: Capture, tabId: number, documentId: string, verified: boolean) {
     this.sweep();
@@ -36,6 +44,7 @@ export class RecoveryEngine {
           a.documentId === documentId &&
           a.query === c.query &&
           a.conversationId === c.conversationId &&
+          a.snapshot.turns.length === c.snapshot.turns.length &&
           JSON.stringify(a.snapshot) === JSON.stringify(c.snapshot) &&
           (a.state === "waiting" || a.state === "failed")
         ),

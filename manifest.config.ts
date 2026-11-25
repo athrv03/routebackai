@@ -6,7 +6,7 @@ export default defineManifest({
   minimum_chrome_version: "139",
   description:
     "Local-first Gemini chat and transparent Firebase hybrid recovery for failed ChatGPT requests.",
-  permissions: ["sidePanel", "storage", "scripting", "webRequest", "alarms"],
+  permissions: ["sidePanel", "storage", "scripting", "webRequest", "alarms", "unlimitedStorage"],
   optional_host_permissions: ["https://chatgpt.com/*"],
   background: { service_worker: "src/background/index.ts", type: "module" },
   action: { default_title: "Open RouteBackAI" },
@@ -14,6 +14,6 @@ export default defineManifest({
   icons: { "128": "icons/icon.png" },
   content_security_policy: {
     extension_pages:
-      "script-src 'self'; object-src 'self'; connect-src 'self' https://firebasevertexai.googleapis.com https://firebaseappcheck.googleapis.com https://firebaseinstallations.googleapis.com",
+      "script-src 'self'; object-src 'self'; connect-src 'self' https://firebasevertexai.googleapis.com https://content-firebaseappcheck.googleapis.com https://firebaseinstallations.googleapis.com",
   },
 });

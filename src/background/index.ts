@@ -50,25 +50,7 @@ async function persist() {
     [KEY]: engine.attempts,
     [OBS]: observations,
   });
-  const tabs = new Set(engine.attempts.map((a) => a.tabId));
-  const all = await chrome.tabs.query({});
-  await Promise.all(
-    all
-      .filter((t) => t.id !== undefined)
-      .map((t) =>
-        chrome.action
-          .setBadgeText({
-            tabId: t.id,
-            text:
-              tabs.has(t.id!) &&
-              engine.attempts.some((a) => a.tabId === t.id && a.error)
-                ? "!"
-                : "",
-          })
-          .catch(() => undefined),
-      ),
-  );
-  await chrome.action.setBadgeBackgroundColor({ color: "#b85c30" });
+  await updateBadges();
   const due = engine.attempts
     .filter((a) => a.state === "waiting")
     .map((a) => a.dueAt!);
@@ -76,6 +58,33 @@ async function persist() {
     await chrome.alarms.create("routeback-retry", {
       when: Math.max(Date.now() + 50, Math.min(...due)),
     });
+}
+// Tabs currently showing the failure badge. Unknown after a service worker restart.
+let badged: Set<number> | undefined;
+async function updateBadges() {
+  const next = new Set(
+    engine.attempts.filter((a) => a.error).map((a) => a.tabId),
+  );
+  let targets: number[];
+  if (!badged) {
+    await chrome.action.setBadgeBackgroundColor({ color: "#b85c30" });
+    targets = (await chrome.tabs.query({}))
+      .map((t) => t.id)
+      .filter((id): id is number => id !== undefined);
+  } else {
+    // Only touch tabs whose badge state changed; skips tabs.query on every persist.
+    targets = [...new Set([...badged, ...next])].filter(
+      (id) => badged!.has(id) !== next.has(id),
+    );
+  }
+  badged = next;
+  await Promise.all(
+    targets.map((tabId) =>
+      chrome.action
+        .setBadgeText({ tabId, text: next.has(tabId) ? "!" : "" })
+        .catch(() => undefined),
+    ),
+  );
 }
 async function stopCapture() {
   const tabs = await chrome.tabs.query({});
@@ -348,7 +357,7 @@ chrome.runtime.onMessage.addListener(
     )
       return false;
     void transaction(async (): Promise<PanelResponse> => {
-      engine.sweep();
+      const swept = engine.sweep();
       if (import.meta.env.MODE === "demo" && m.type === "demo-failure") {
         const tabs = await chrome.tabs.query({
           active: true,
@@ -401,7 +410,8 @@ chrome.runtime.onMessage.addListener(
           });
           return { ok: true };
         case "attempts":
-          await persist();
+          // Read path: only write storage/badges when the sweep changed state.
+          if (swept) await persist();
           return { ok: true, attempts: engine.attempts };
         case "classified":
           if (isClassification(req.classification))

@@ -29,7 +29,13 @@ import {
   privateBuild,
   type Provider,
 } from "../ai/provider";
-import { completeTurns, route, serialize, wordCount } from "../shared/routing";
+import {
+  completeTurns,
+  exceedsLocalWords,
+  MAX_LOCAL_WORDS,
+  route,
+  serialize,
+} from "../shared/routing";
 import type {
   Attempt,
   Chat,
@@ -97,6 +103,15 @@ function CopyButton({ text }: { text: string }) {
     </button>
   );
 }
+// Owns its own ticker so the countdown does not re-render the whole panel every second.
+function Countdown({ until }: { until: number }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  return <>{Math.max(0, Math.ceil((until - now) / 1000))}s</>;
+}
 interface RecoveryResult {
   id: string;
   tabId: number;
@@ -139,7 +154,8 @@ export function App() {
   const [held, setHeld] = useState<Set<string>>(new Set());
   const seen = useRef(new Set<string>());
   const mounted = useRef(true);
-  const [now, setNow] = useState(Date.now());
+  // Bumped by a one-shot timer at the next attempt deadline so expired items re-render.
+  const [, setTick] = useState(0);
   const end = useRef<HTMLDivElement>(null);
   const current = chats.find((c) => c.id === currentId);
   const draft = drafts[currentId] || "";
@@ -164,6 +180,7 @@ export function App() {
         if (!mounted.current) return;
         const initial = saved.length ? saved : [newChat()];
         chatsRef.current = initial;
+        persisted.current = saved;
         setChats(initial);
         setCurrentId(initial[0].id);
         setLoaded(true);
@@ -188,11 +205,8 @@ export function App() {
         },
       );
     };
+    // Initial fetch only; later updates arrive through storage.onChanged and deadline refreshes.
     poll();
-    const interval = setInterval(() => {
-      setNow(Date.now());
-      poll();
-    }, 1000);
     const onStorage = (
       changes: Record<string, chrome.storage.StorageChange>,
       area: string,
@@ -233,7 +247,6 @@ export function App() {
     window.addEventListener("pagehide", unload);
     return () => {
       unload();
-      clearInterval(interval);
       window.removeEventListener("pagehide", unload);
       chrome.storage.onChanged.removeListener(onStorage);
       chrome.tabs.onRemoved.removeListener(onClosed);
@@ -249,12 +262,17 @@ export function App() {
   }, [chats, results, view, currentId]);
   // Serialize storage writes so streamed completion cannot overwrite a newer user action.
   const writes = useRef<Promise<unknown>>(Promise.resolve());
+  const persisted = useRef<Chat[] | undefined>(undefined);
   const store = useCallback((next: Chat[]) => {
     chatsRef.current = next;
     if (mounted.current) setChats(next);
     const write = writes.current
       .catch(() => undefined)
-      .then(() => saveChats(next));
+      .then(async () => {
+        // Diff against the last successful write so only changed chats are rewritten.
+        await saveChats(next, persisted.current);
+        persisted.current = next;
+      });
     writes.current = write;
     return write.catch((e) => {
       if (mounted.current) {
@@ -307,13 +325,19 @@ export function App() {
     cached?: Classification,
   ) => {
     if (!provider) throw new Error("Model provider is loading.");
-    const classification =
-      cached ?? (await provider.classify(query, controller.signal));
     const text = serialize(turns, query);
-    const fits = await provider.fits(text, controller.signal).catch((e) => {
-      if (controller.signal.aborted) throw e;
-      return false;
-    });
+    // route() checks length, then coding, then fit: skip local model calls whose result cannot change the route.
+    const long = exceedsLocalWords(query);
+    const classification: Classification = long
+      ? (cached ?? "uncertain")
+      : (cached ?? (await provider.classify(query, controller.signal)));
+    const fits =
+      long || classification === "coding"
+        ? true
+        : await provider.fits(text, controller.signal).catch((e) => {
+            if (controller.signal.aborted) throw e;
+            return false;
+          });
     const next = route(query, classification, fits, mode);
     if (mounted.current) setDecision(next);
     controller.signal.throwIfAborted();
@@ -432,6 +456,7 @@ export function App() {
     const controller = acquire();
     if (!controller) return;
     let claimed = false;
+    let expiryTimer: ReturnType<typeof setTimeout> | undefined;
     let text = "";
     let source: Source | undefined;
     let reason = "";
@@ -468,6 +493,13 @@ export function App() {
         tabId: active.tabId,
         expiresAt: active.expiresAt,
       };
+      expiryTimer = setTimeout(() => {
+        controller.abort();
+        resultsRef.current = resultsRef.current.filter(
+          (r) => r.id !== active.id,
+        );
+        if (mounted.current) setResults(resultsRef.current);
+      }, active.expiresAt - Date.now());
       const chosen = await decide(
         active.query,
         active.snapshot.turns,
@@ -508,6 +540,7 @@ export function App() {
             : errorText(e),
         );
     } finally {
+      clearTimeout(expiryTimer);
       activeRecovery.current = undefined;
       finish();
     }
@@ -528,7 +561,10 @@ export function App() {
     }
     const unclassified = attempts.find(
       (a) =>
-        !a.classification && a.state !== "claimed" && a.expiresAt > Date.now(),
+        !a.classification &&
+        !exceedsLocalWords(a.query) &&
+        a.state !== "claimed" &&
+        a.expiresAt > Date.now(),
     );
     if (!unclassified) return;
     const controller = acquire();
@@ -543,14 +579,31 @@ export function App() {
       })
       .finally(finish);
   }, [attempts, busy, provider, onboarded, held, mode]);
+  // Wake once at the next deadline (retry grace, claim lease, expiry) instead of polling every second.
+  // The attempts request runs the background sweep; chrome.alarms may be clamped to 30s in packed builds.
   useEffect(() => {
-    const active = activeRecovery.current;
-    if (active && active.expiresAt <= now) {
-      abort.current?.abort();
-      resultsRef.current = resultsRef.current.filter((r) => r.id !== active.id);
-      setResults(resultsRef.current);
-    }
-  }, [now, attempts]);
+    const start = Date.now();
+    // Only future deadlines: dueAt stays set after an attempt fails, and past values would loop.
+    const deadlines = attempts
+      .flatMap((a) => [a.dueAt, a.claim?.until, a.expiresAt])
+      .filter((t): t is number => t !== undefined && t > start);
+    if (!deadlines.length) return;
+    const timer = setTimeout(
+      () => {
+        setTick((n) => n + 1);
+        void request({ type: "attempts" }).then(
+          (res) => {
+            if (mounted.current) setAttempts(res.attempts || []);
+          },
+          (e) => {
+            if (mounted.current) setError(errorText(e));
+          },
+        );
+      },
+      Math.max(50, Math.min(...deadlines) - Date.now() + 50),
+    );
+    return () => clearTimeout(timer);
+  }, [attempts]);
   async function prepare() {
     if (!provider) return;
     const controller = acquire();
@@ -609,7 +662,7 @@ export function App() {
       setError(errorText(e));
     }
   }
-  const pending = attempts.filter((a) => a.error && a.expiresAt > now);
+  const pending = attempts.filter((a) => a.error && a.expiresAt > Date.now());
   const lastUser = current?.messages.findLast((m) => m.role === "user");
   return (
     <div className="app-shell">
@@ -1045,10 +1098,10 @@ export function App() {
               />
               <div className="composer-bottom">
                 <span>
-                  {wordCount(draft) > 25 ? (
+                  {exceedsLocalWords(draft) ? (
                     <>
                       <Cloud size={12} />
-                      Over 25 words · cloud in Auto
+                      Over {MAX_LOCAL_WORDS} words · cloud in Auto
                     </>
                   ) : (
                     <>
@@ -1131,7 +1184,7 @@ export function App() {
                 <span className="status-dot amber" />
                 {a.error}
                 <span className="expiry">
-                  {Math.max(0, Math.ceil((a.expiresAt - now) / 1000))}s left
+                  <Countdown until={a.expiresAt} /> left
                 </span>
               </div>
               <span className="eyebrow">STORED QUERY · TAB {a.tabId}</span>
