@@ -31,6 +31,53 @@ function native(): NativeModel | undefined {
   return (globalThis as typeof globalThis & { LanguageModel?: NativeModel })
     .LanguageModel;
 }
+// Firebase AI 13.4.0 bug: on-device streams are re-encoded as SSE `data: {json}\n\n` and parsed
+// with /^data\: (.*)\n\n/. Its `.` stops at U+2028/U+2029, which JSON.stringify leaves unescaped, so
+// a Gemini Nano chunk containing either fails with "Failed to parse stream (AI/parse-failed)".
+// Normalize them to "\n" before the SDK sees the text.
+const SEPARATORS = /[\u2028\u2029]/g;
+export function normalizeSeparators(
+  stream: ReadableStream<string>,
+): ReadableStream<string> {
+  return stream.pipeThrough(
+    new TransformStream<string, string>({
+      transform(chunk, controller) {
+        controller.enqueue(chunk.replace(SEPARATORS, "\n"));
+      },
+    }),
+  );
+}
+type StreamingSession = Record<PropertyKey, unknown> & {
+  promptStreaming?: (...args: unknown[]) => ReadableStream<string>;
+};
+// The SDK adapter only calls availability() and create() on the native provider (13.4.0).
+// If a future SDK changes these internals, this is a no-op rather than a failure.
+function sanitizeOnDeviceStreams(model: GenerativeModel) {
+  const adapter = (
+    model as unknown as {
+      chromeAdapter?: { languageModelProvider?: NativeModel };
+    }
+  ).chromeAdapter;
+  const nativeModel = adapter?.languageModelProvider;
+  if (!adapter || !nativeModel) return;
+  adapter.languageModelProvider = {
+    availability: (options) => nativeModel.availability(options),
+    create: async (options) => {
+      const session = (await nativeModel.create(
+        options,
+      )) as unknown as StreamingSession;
+      return new Proxy(session, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target);
+          if (prop === "promptStreaming" && typeof value === "function")
+            return (...args: unknown[]) =>
+              normalizeSeparators(value.apply(target, args));
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      }) as unknown as NativeSession;
+    },
+  };
+}
 export interface Provider {
   availability(): Promise<string>;
   prepare(progress: (n: number) => void): Promise<void>;
@@ -98,7 +145,7 @@ export class FirebaseProvider implements Provider {
     signal?: AbortSignal,
     classification = false,
   ): GenerativeModel {
-    return getGenerativeModel(
+    const model = getGenerativeModel(
       this.getAI(),
       {
         mode,
@@ -130,6 +177,8 @@ export class FirebaseProvider implements Provider {
       },
       { timeout: 90_000 },
     );
+    sanitizeOnDeviceStreams(model);
+    return model;
   }
   async availability() {
     return native() ? native()!.availability(MODEL_OPTIONS) : "unavailable";

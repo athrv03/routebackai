@@ -131,6 +131,38 @@ describe("installed Firebase SDK compatibility", () => {
 });
 
 
+describe("Firebase SDK on-device stream parsing workaround", () => {
+  it.each([
+    ["U+2028", "line one\u2028line two"],
+    ["U+2029", "para one\u2029para two"],
+  ])("streams Nano output containing %s instead of failing to parse", async (_, text) => {
+    vi.stubGlobal("LanguageModel", {
+      availability: async () => "available",
+      create: async () => ({
+        promptStreaming: () =>
+          new ReadableStream({
+            start(c) {
+              c.enqueue(text);
+              c.enqueue(" and more");
+              c.close();
+            },
+          }),
+        destroy: vi.fn(),
+      }),
+    });
+    vi.stubGlobal("fetch", vi.fn());
+    const chunks: string[] = [];
+    const source = await new FirebaseProvider().stream(
+      "Hello",
+      { target: "local", reason: "Local only" },
+      new AbortController().signal,
+      (delta) => chunks.push(delta),
+    );
+    expect(source).toBe("ON_DEVICE");
+    expect(chunks.join("")).toBe(text.replace(/[\u2028\u2029]/, "\n") + " and more");
+  });
+});
+
 describe('current Chrome context measurement', () => {
   it('uses measureContextUsage on current Chrome instead of a legacy estimate', async () => {
     const measure = vi.fn(async () => 1000);
